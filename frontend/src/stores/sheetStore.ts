@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import type { RehearsalSheet, SheetChannelLine, SheetCueLine, SheetDraft } from '@/types/sheet'
 import { db } from '@/utils/db'
 import { createId } from '@/utils/id'
+import { resolveSessionLevels } from '@/utils/levelResolve'
 import { sortFixturesByChannel } from '@/utils/patch'
 import { useCueStore } from '@/stores/cueStore'
 import { useFixtureStore } from '@/stores/fixtureStore'
@@ -60,10 +61,14 @@ export const useSheetStore = defineStore('sheet', () => {
     const ordered = cueStore.sortedCuesOfSession(draft.sessionId).filter((cue) => draft.cueIds.includes(cue.id))
     if (ordered.length === 0) return null
 
+    /** 生成时刻的有效电平（含沿袭值）即固化进快照，之后改动不影响本表 */
+    const resolvedByCue = resolveSessionLevels(cueStore.sortedCuesOfSession(draft.sessionId), levelStore.levels)
+
     const cueLines: SheetCueLine[] = ordered.map((cue) => {
+      const resolved = new Map((resolvedByCue.get(cue.id) ?? []).map((item) => [item.fixtureId, item]))
       const channels: SheetChannelLine[] = sortFixturesByChannel(fixtureStore.fixturesOfSession(draft.sessionId))
         .map((fixture) => {
-          const level = levelStore.levelOf(cue.id, fixture.id)
+          const level = resolved.get(fixture.id)
           if (!level) return null
           return {
             channel: fixture.channel,

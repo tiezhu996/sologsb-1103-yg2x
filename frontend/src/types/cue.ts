@@ -22,6 +22,8 @@ export interface Cue {
   holdSec: number
   /** 备注 */
   note: string
+  /** 沿袭上一条：打开后未自设的通道跟随上游最近一条自设过该通道的 Cue */
+  inheritLevels: boolean
   /** 时间轴落库位次，拖拽调整先后时写回 */
   orderIndex: number
   createdAt: number
@@ -66,6 +68,7 @@ export function createEmptyCueDraft(sessionId: string, cueNo: string): CueDraft 
     fadeInSec: 3,
     fadeOutSec: 3,
     holdSec: 5,
-    note: ''
+    note: '',
+    inheritLevels: true
   }
 }

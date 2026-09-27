@@ -6,12 +6,13 @@ import BlankHint from '@/components/common/BlankHint.vue'
 import ChannelChip from '@/components/common/ChannelChip.vue'
 import CueNoInput from '@/components/common/CueNoInput.vue'
 import FadeBar from '@/components/common/FadeBar.vue'
+import { useResolvedLevels } from '@/hooks/useResolvedLevels'
 import { useCueStore } from '@/stores/cueStore'
 import { useFixtureStore } from '@/stores/fixtureStore'
-import { useLevelStore } from '@/stores/levelStore'
+import { useLevelStore, type CueLevelPatch } from '@/stores/levelStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import type { Fixture, FixturePosition } from '@/types/fixture'
-import { COLOR_TEMP_MAX, COLOR_TEMP_MIN, COLOR_TEMP_STEP } from '@/types/level'
+import { COLOR_TEMP_MAX, COLOR_TEMP_MIN, COLOR_TEMP_STEP, type ResolvedLevel } from '@/types/level'
 import { cueTotalSeconds, checkColorTempConsistency, formatSeconds, formatTransition } from '@/utils/fade'
 import { normalizeCueNo } from '@/utils/cueOrder'
 
@@ -31,6 +32,22 @@ const session = computed(() => (sessionId.value ? sessionStore.sessionById(sessi
 const fixtures = computed(() => (sessionId.value ? fixtureStore.sortedFixturesOfSession(sessionId.value) : []))
 const levels = computed(() => levelStore.levelsOfCue(cueId.value))
 
+const { resolvedOfCue, resolvedLevelOf } = useResolvedLevels(sessionId)
+
+/** 某通道的有效电平（自设优先，开关打开时沿袭上游） */
+function effectiveOf(fixtureId: string): ResolvedLevel | null {
+  return resolvedLevelOf(cueId.value, fixtureId)
+}
+
+/** 某通道的沿袭电平；本条已自设或未沿袭时返回 null */
+function inheritedOf(fixtureId: string): ResolvedLevel | null {
+  const hit = effectiveOf(fixtureId)
+  return hit && hit.source === 'inherited' ? hit : null
+}
+
+/** 沿袭中的通道数量（本条未自设、跟随上游） */
+const inheritedCount = computed(() => resolvedOfCue(cueId.value).filter((item) => item.source === 'inherited').length)
+
 const siblingNos = computed(() =>
   cue.value
     ? cueStore
@@ -40,10 +57,10 @@ const siblingNos = computed(() =>
     : []
 )
 
-/** 已设定电平的通道（用于色温一致性判定） */
+/** 有效电平参与的通道（自设 + 沿袭，用于色温一致性判定） */
 const tempItems = computed(() => {
   const items: Array<{ fixtureId: string; channel: number; position: FixturePosition; colorTempK: number }> = []
-  levels.value.forEach((level) => {
+  resolvedOfCue(cueId.value).forEach((level) => {
     const fixture = fixtureStore.fixtureById(level.fixtureId)
     if (!fixture) return
     items.push({
@@ -64,22 +81,37 @@ function isEnabled(fixtureId: string): boolean {
   return levelStore.levelOf(cueId.value, fixtureId) !== null
 }
 
+/** 显示用亮度：有效电平（自设或沿袭），未参与时为 0 */
 function intensityOf(fixtureId: string): number {
-  return levelStore.levelOf(cueId.value, fixtureId)?.intensity ?? 0
+  return effectiveOf(fixtureId)?.intensity ?? 0
 }
 
+/** 显示用色温：有效电平（自设或沿袭），未参与时取基准色温 */
 function tempOf(fixtureId: string): number {
-  return levelStore.levelOf(cueId.value, fixtureId)?.colorTempK ?? defaultTempK.value
+  return effectiveOf(fixtureId)?.colorTempK ?? defaultTempK.value
 }
 
 const focusDrafts = ref<Record<string, string>>({})
 
 function focusValue(fixtureId: string): string {
-  return focusDrafts.value[fixtureId] ?? levelStore.levelOf(cueId.value, fixtureId)?.focusNote ?? ''
+  return focusDrafts.value[fixtureId] ?? effectiveOf(fixtureId)?.focusNote ?? ''
 }
 
 function onFocusInput(fixtureId: string, value: string): void {
   focusDrafts.value = { ...focusDrafts.value, [fixtureId]: value }
+}
+
+/**
+ * 手动调整的基底：本条未自设时以沿袭值（或默认值）为底，
+ * 避免只动一个维度就把其余跟随上游的维度覆盖掉。
+ */
+function manualBase(fixtureId: string): CueLevelPatch {
+  if (levelStore.levelOf(cueId.value, fixtureId)) return {}
+  const inherited = inheritedOf(fixtureId)
+  if (inherited) {
+    return { intensity: inherited.intensity, colorTempK: inherited.colorTempK, focusNote: inherited.focusNote }
+  }
+  return { intensity: 70, colorTempK: defaultTempK.value }
 }
 
 async function commitFocus(fixtureId: string): Promise<void> {
@@ -88,15 +120,16 @@ async function commitFocus(fixtureId: string): Promise<void> {
   const next = { ...focusDrafts.value }
   delete next[fixtureId]
   focusDrafts.value = next
-  if (!isEnabled(fixtureId)) return
-  await levelStore.upsertLevel(cueId.value, fixtureId, { focusNote: draft })
+  if (!isEnabled(fixtureId) && !cue.value?.inheritLevels) return
+  await levelStore.upsertLevel(cueId.value, fixtureId, { ...manualBase(fixtureId), focusNote: draft })
 }
 
 async function toggleFixture(fixture: Fixture, enabled: boolean): Promise<void> {
   if (enabled) {
+    const inherited = inheritedOf(fixture.id)
     await levelStore.upsertLevel(cueId.value, fixture.id, {
-      intensity: 70,
-      colorTempK: defaultTempK.value,
+      intensity: inherited?.intensity ?? 70,
+      colorTempK: inherited?.colorTempK ?? defaultTempK.value,
       focusNote: focusValue(fixture.id)
     })
     return
@@ -105,25 +138,47 @@ async function toggleFixture(fixture: Fixture, enabled: boolean): Promise<void> 
 }
 
 async function setIntensity(fixtureId: string, value: number): Promise<void> {
-  await levelStore.upsertLevel(cueId.value, fixtureId, { intensity: value })
+  await levelStore.upsertLevel(cueId.value, fixtureId, { ...manualBase(fixtureId), intensity: value })
 }
 
 async function setColorTemp(fixtureId: string, value: number | null): Promise<void> {
   if (value === null) return
-  await levelStore.upsertLevel(cueId.value, fixtureId, { colorTempK: value })
+  await levelStore.upsertLevel(cueId.value, fixtureId, { ...manualBase(fixtureId), colorTempK: value })
 }
 
 async function alignToDominant(): Promise<void> {
-  if (levels.value.length === 0) return
+  if (tempItems.value.length === 0) return
   const target = tempCheck.value.dominantK
-  await Promise.all(levels.value.map((level) => levelStore.upsertLevel(cueId.value, level.fixtureId, { colorTempK: target })))
-  message.success(`已将 ${levels.value.length} 个通道对齐到 ${target}K`)
+  await Promise.all(
+    tempItems.value.map((item) => levelStore.upsertLevel(cueId.value, item.fixtureId, { ...manualBase(item.fixtureId), colorTempK: target }))
+  )
+  message.success(`已将 ${tempItems.value.length} 个通道对齐到 ${target}K`)
 }
 
 async function clearAll(): Promise<void> {
   const count = levels.value.length
   await levelStore.removeByCue(cueId.value)
-  message.success(`已清空 ${count} 个通道电平`)
+  message.success(`已清空 ${count} 个自设电平${cue.value?.inheritLevels ? '，通道恢复跟随上游' : ''}`)
+}
+
+/** 切换「沿袭上一条」 */
+async function commitInherit(value: string | number | boolean): Promise<void> {
+  if (!cue.value) return
+  const next = value === true
+  if (next === cue.value.inheritLevels) return
+  await cueStore.updateCue(cue.value.id, { inheritLevels: next })
+}
+
+/** 色温列的状态文本：自设显示漂移量，沿袭显示来源 Cue */
+function driftTextOf(fixtureId: string): string {
+  const drift = Math.abs(tempOf(fixtureId) - defaultTempK.value)
+  if (isEnabled(fixtureId)) return `偏移 ${drift}K`
+  const inherited = inheritedOf(fixtureId)
+  if (inherited) {
+    const sourceNo = cueStore.cueById(inherited.sourceCueId)?.cueNo ?? '上游'
+    return `沿袭 ${sourceNo} · 偏移 ${drift}K`
+  }
+  return cue.value?.inheritLevels ? '上游未设定' : '未参与'
 }
 
 async function commitCueNo(value: string): Promise<void> {
@@ -194,6 +249,10 @@ function goSheets(): void {
             <p class="cue-head__meta mono">{{ formatTransition(cue) }} · 合计 {{ formatSeconds(cueTotalSeconds(cue)) }}</p>
           </div>
           <NTag size="small" :bordered="false" type="warning">{{ cue.trigger }}</NTag>
+          <span class="inherit-toggle" title="打开后，未自设的通道跟随上游最近一条自设 Cue 的数值；这里手动动过的通道即按本条设置">
+            <NSwitch :value="cue.inheritLevels" size="small" @update:value="commitInherit" />
+            <span class="inherit-toggle__text">沿袭上一条</span>
+          </span>
           <span class="toolbar__spacer" />
           <NButton size="small" quaternary @click="goSiblingCue(-1)">上一条 Cue</NButton>
           <NButton size="small" quaternary @click="goSiblingCue(1)">下一条 Cue</NButton>
@@ -209,9 +268,12 @@ function goSheets(): void {
       </NAlert>
 
       <div class="toolbar">
-        <span class="toolbar__label">已设定 {{ levels.length }} / {{ fixtures.length }} 个通道</span>
+        <span class="toolbar__label">
+          已设定 {{ levels.length }} / {{ fixtures.length }} 个通道
+          <template v-if="cue.inheritLevels && inheritedCount > 0">，沿袭上游 {{ inheritedCount }} 个</template>
+        </span>
         <span class="toolbar__spacer" />
-        <NButton size="small" :disabled="levels.length === 0" @click="alignToDominant">
+        <NButton size="small" :disabled="tempItems.length === 0" @click="alignToDominant">
           全部对齐到 {{ defaultTempK }}K
         </NButton>
         <NButton size="small" quaternary type="error" :disabled="levels.length === 0" @click="clearAll">
@@ -229,7 +291,7 @@ function goSheets(): void {
 
       <section v-else class="panel">
         <h2 class="panel__title">
-          通道电平<span class="panel__title-tag">开关控制该通道是否参与本 Cue</span>
+          通道电平<span class="panel__title-tag">沿袭开关打开时，未自设通道跟随上游，手动调整即固化为本条设置</span>
         </h2>
 
         <div class="level-table">
@@ -245,7 +307,10 @@ function goSheets(): void {
             v-for="fixture in fixtures"
             :key="fixture.id"
             class="level-row"
-            :class="{ 'level-row--off': !isEnabled(fixture.id) }"
+            :class="{
+              'level-row--off': !isEnabled(fixture.id) && inheritedOf(fixture.id) === null,
+              'level-row--inherited': !isEnabled(fixture.id) && inheritedOf(fixture.id) !== null
+            }"
           >
             <NSwitch
               :value="isEnabled(fixture.id)"
@@ -257,7 +322,8 @@ function goSheets(): void {
               <ChannelChip
                 :channel="fixture.channel"
                 :position="fixture.position"
-                :intensity="isEnabled(fixture.id) ? intensityOf(fixture.id) : null"
+                :intensity="effectiveOf(fixture.id) ? intensityOf(fixture.id) : null"
+                :inherited="inheritedOf(fixture.id) !== null"
                 :gel="fixture.gel"
                 :fixture-type="fixture.fixtureType"
                 size="small"
@@ -271,7 +337,7 @@ function goSheets(): void {
                 :min="0"
                 :max="100"
                 :step="1"
-                :disabled="!isEnabled(fixture.id)"
+                :disabled="!isEnabled(fixture.id) && !cue.inheritLevels"
                 @update:value="(value) => setIntensity(fixture.id, value)"
               />
               <NInputNumber
@@ -280,7 +346,7 @@ function goSheets(): void {
                 :min="0"
                 :max="100"
                 :show-button="false"
-                :disabled="!isEnabled(fixture.id)"
+                :disabled="!isEnabled(fixture.id) && !cue.inheritLevels"
                 style="width: 82px"
                 @update:value="(value) => setIntensity(fixture.id, value ?? 0)"
               />
@@ -293,23 +359,19 @@ function goSheets(): void {
                 :min="COLOR_TEMP_MIN"
                 :max="COLOR_TEMP_MAX"
                 :step="COLOR_TEMP_STEP"
-                :disabled="!isEnabled(fixture.id)"
+                :disabled="!isEnabled(fixture.id) && !cue.inheritLevels"
                 style="width: 108px"
                 @update:value="(value) => setColorTemp(fixture.id, value)"
               />
               <span class="level-row__drift mono">
-                {{
-                  isEnabled(fixture.id)
-                    ? `偏移 ${Math.abs(tempOf(fixture.id) - defaultTempK)}K`
-                    : '未参与'
-                }}
+                {{ driftTextOf(fixture.id) }}
               </span>
             </div>
 
             <NInput
               :value="focusValue(fixture.id)"
               size="small"
-              :disabled="!isEnabled(fixture.id)"
+              :disabled="!isEnabled(fixture.id) && !cue.inheritLevels"
               placeholder="对焦说明（失焦保存）"
               @update:value="(value) => onFocusInput(fixture.id, value)"
               @blur="commitFocus(fixture.id)"
@@ -319,7 +381,7 @@ function goSheets(): void {
         </div>
       </section>
 
-      <section v-if="levels.length > 0" class="panel">
+      <section v-if="tempItems.length > 0" class="panel">
         <h2 class="panel__title">色温一致性检查<span class="panel__title-tag">容差 ±{{ tempCheck.toleranceK }}K</span></h2>
         <div class="temp-grid">
           <div
@@ -397,6 +459,23 @@ function goSheets(): void {
 
 .level-row--off {
   opacity: 0.5;
+}
+
+.level-row--inherited {
+  opacity: 0.78;
+}
+
+.inherit-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.inherit-toggle__text {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  white-space: nowrap;
 }
 
 .level-row__chip {

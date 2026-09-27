@@ -21,6 +21,8 @@ const props = withDefaults(
     fixtureType?: string
     /** 是否为重复通道号 */
     duplicate?: boolean
+    /** 是否为沿袭上游的数值（本条未自设） */
+    inherited?: boolean
     /** 是否为选中态 */
     selected?: boolean
     /** 是否显示悬停手型并可点击 */
@@ -34,6 +36,7 @@ const props = withDefaults(
     gel: '',
     fixtureType: '',
     duplicate: false,
+    inherited: false,
     selected: false,
     clickable: false,
     size: 'medium'
@@ -62,11 +65,12 @@ function handleClick(): void {
       `channel-chip--${props.size}`,
       {
         'channel-chip--duplicate': props.duplicate,
+        'channel-chip--inherited': props.inherited,
         'channel-chip--selected': props.selected,
         'channel-chip--clickable': props.clickable
       }
     ]"
-    :title="`CH${props.channel}${props.position ? ` · ${props.position}` : ''}${props.fixtureType ? ` · ${props.fixtureType}` : ''}`"
+    :title="`CH${props.channel}${props.position ? ` · ${props.position}` : ''}${props.fixtureType ? ` · ${props.fixtureType}` : ''}${props.inherited ? ' · 沿袭上游' : ''}`"
     @click="handleClick"
   >
     <span class="channel-chip__dot" :style="{ background: dotColor }" />
@@ -78,6 +82,7 @@ function handleClick(): void {
       </span>
       <span class="channel-chip__intensity-text">{{ intensityText }}</span>
     </span>
+    <span v-if="props.inherited" class="channel-chip__inherit-mark">沿</span>
   </span>
 </template>
 
@@ -121,6 +126,21 @@ function handleClick(): void {
   border-color: rgba(232, 84, 84, 0.85);
   background: rgba(232, 84, 84, 0.14);
   color: #ffbdbd;
+}
+
+.channel-chip--inherited {
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.channel-chip__inherit-mark {
+  padding: 0 3px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 10px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.55);
 }
 
 .channel-chip__dot {

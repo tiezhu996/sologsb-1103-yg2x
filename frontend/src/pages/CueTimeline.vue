@@ -10,6 +10,7 @@ import {
   NInputNumber,
   NModal,
   NSelect,
+  NSwitch,
   useDialog,
   useMessage
 } from 'naive-ui'
@@ -17,6 +18,7 @@ import ChannelChip from '@/components/common/ChannelChip.vue'
 import CueNoInput from '@/components/common/CueNoInput.vue'
 import FadeBar from '@/components/common/FadeBar.vue'
 import { useCueOrder } from '@/hooks/useCueOrder'
+import { useResolvedLevels } from '@/hooks/useResolvedLevels'
 import { useCueStore, type CuePatch, type FadeShiftScope } from '@/stores/cueStore'
 import { useFixtureStore } from '@/stores/fixtureStore'
 import { useLevelStore } from '@/stores/levelStore'
@@ -39,6 +41,7 @@ const sessionId = computed(() => String(route.params.id ?? ''))
 const session = computed(() => sessionStore.sessionById(sessionId.value))
 
 const { cues, summary, nextCueNo, hardCutCount, reorder } = useCueOrder(sessionId)
+const { resolvedOfCue } = useResolvedLevels(sessionId)
 
 const triggerOptions = CUE_TRIGGERS.map((trigger) => ({ label: trigger, value: trigger }))
 const scopeOptions = [
@@ -57,19 +60,22 @@ interface CueChannelChip {
   channel: number
   intensity: number
   position: FixturePosition | null
+  /** 数值是否沿袭自上游（本条未自设） */
+  inherited: boolean
 }
 
-/** 一条 Cue 已设定电平的通道标签 */
+/** 一条 Cue 的有效通道标签：自设优先，开关打开时沿袭上游最近自设值 */
 function channelsOfCue(cueId: string): CueChannelChip[] {
   const chips: CueChannelChip[] = []
-  levelStore.levelsOfCue(cueId).forEach((level) => {
+  resolvedOfCue(cueId).forEach((level) => {
     const fixture = fixtureStore.fixtureById(level.fixtureId)
     if (!fixture) return
     chips.push({
       fixtureId: level.fixtureId,
       channel: fixture.channel,
       intensity: level.intensity,
-      position: fixture.position
+      position: fixture.position,
+      inherited: level.source === 'inherited'
     })
   })
   return chips.sort((a, b) => a.channel - b.channel)
@@ -131,7 +137,8 @@ async function submitCreate(): Promise<void> {
     fadeInSec: createForm.fadeInSec ?? 0,
     fadeOutSec: createForm.fadeOutSec ?? 0,
     holdSec: createForm.holdSec ?? 0,
-    note: createForm.note.trim()
+    note: createForm.note.trim(),
+    inheritLevels: true
   })
   message.success(`已插入 ${normalizeCueNo(createForm.cueNo)}`)
   showCreate.value = false
@@ -208,6 +215,13 @@ async function commitTrigger(cue: Cue, value: string | number | Array<string | n
   await cueStore.updateCue(cue.id, { trigger: value as CueTrigger })
 }
 
+/** 切换「沿袭上一条」：打开后未自设的通道跟随上游最近自设值 */
+async function commitInherit(cue: Cue, value: string | number | boolean): Promise<void> {
+  const next = value === true
+  if (next === cue.inheritLevels) return
+  await cueStore.updateCue(cue.id, { inheritLevels: next })
+}
+
 async function commitCueNo(cue: Cue, value: string): Promise<void> {
   const normalized = normalizeCueNo(value)
   if (normalized === cue.cueNo) return
@@ -232,10 +246,10 @@ async function duplicateCue(cue: Cue): Promise<void> {
 async function copyPrevious(cue: Cue): Promise<void> {
   const ok = await cueStore.copyPreviousParams(cue.id)
   if (!ok) {
-    message.warning('这是第一条 Cue，没有可沿用的上一条参数')
+    message.warning('这是第一条 Cue，没有可复制的上一条参数')
     return
   }
-  message.success(`已沿用上一条 ${cue.cueNo} 的过渡参数`)
+  message.success('已复制上一条的过渡参数')
 }
 
 function confirmRemove(cue: Cue): void {
@@ -327,7 +341,7 @@ function channelFilterDuplicate(fixtureId: string): boolean {
         <h1 class="page__title">Cue 编排时间轴</h1>
         <p class="page__subtitle">
           {{ session ? `${session.order}. ${session.title}` : '场次不存在或已删除' }} ·
-          插入提示点、拖动排序、复制上一条参数并批量偏移过渡时间。
+          插入提示点、拖动排序、沿袭上一条电平并批量偏移过渡时间。
         </p>
       </div>
       <div class="page__actions">
@@ -443,6 +457,10 @@ function channelFilterDuplicate(fixtureId: string): boolean {
                 style="width: 118px"
                 @update:value="(value) => commitTrigger(cue, value)"
               />
+              <span class="inherit-toggle" title="打开后，未自设的通道跟随上游最近一条自设 Cue 的数值；本条手动动过的通道不受影响">
+                <NSwitch :value="cue.inheritLevels" size="small" @update:value="(value) => commitInherit(cue, value)" />
+                <span class="inherit-toggle__text">沿袭上一条</span>
+              </span>
               <NButton size="tiny" type="primary" ghost @click="goLevels(cue.id)">
                 电平编辑（{{ levelStore.levelsOfCue(cue.id).length }}）
               </NButton>
@@ -507,13 +525,16 @@ function channelFilterDuplicate(fixtureId: string): boolean {
                   :channel="channel.channel"
                   :position="channel.position"
                   :intensity="channel.intensity"
+                  :inherited="channel.inherited"
                   :duplicate="channelFilterDuplicate(channel.fixtureId)"
                   size="small"
                   clickable
                   @click="goLevels(cue.id)"
                 />
               </div>
-              <span v-else class="cue-row__channels-empty">未设定通道电平</span>
+              <span v-else class="cue-row__channels-empty">
+                {{ cue.inheritLevels ? '沿袭上一条 · 上游暂无可沿袭电平' : '未设定通道电平' }}
+              </span>
 
               <NInput
                 :value="noteValue(cue)"
@@ -530,7 +551,7 @@ function channelFilterDuplicate(fixtureId: string): boolean {
           </div>
 
           <div class="cue-row__actions">
-            <NButton size="tiny" quaternary :disabled="index === 0" @click="copyPrevious(cue)">沿用上一条</NButton>
+            <NButton size="tiny" quaternary :disabled="index === 0" @click="copyPrevious(cue)">复制上一条过渡</NButton>
             <NButton size="tiny" quaternary @click="duplicateCue(cue)">复制为新 Cue</NButton>
             <NButton size="tiny" quaternary :disabled="index === 0" @click="move(cue, -1)">上移</NButton>
             <NButton size="tiny" quaternary :disabled="index === cues.length - 1" @click="move(cue, 1)">下移</NButton>
@@ -708,6 +729,19 @@ function channelFilterDuplicate(fixtureId: string): boolean {
 .cue-row__label {
   flex: 1;
   min-width: 200px;
+}
+
+.inherit-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.inherit-toggle__text {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  white-space: nowrap;
 }
 
 .cue-row__body {

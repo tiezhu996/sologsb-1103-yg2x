@@ -17,6 +17,7 @@ import {
 import BlankHint from '@/components/common/BlankHint.vue'
 import ChannelChip from '@/components/common/ChannelChip.vue'
 import { useChannelConflict } from '@/hooks/useChannelConflict'
+import { useResolvedLevels } from '@/hooks/useResolvedLevels'
 import { useFixtureStore } from '@/stores/fixtureStore'
 import { useLevelStore } from '@/stores/levelStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -44,6 +45,7 @@ const sessionId = computed(() => String(route.params.id ?? ''))
 const session = computed(() => sessionStore.sessionById(sessionId.value))
 
 const { messages, conflictChannels, conflictFixtureIds, loads, hasConflict, hasOverload } = useChannelConflict(sessionId)
+const { averageIntensityOfFixture } = useResolvedLevels(sessionId)
 
 const viewMode = ref<'group' | 'channel'>('group')
 const collapsed = ref<FixturePosition[]>([])
@@ -96,8 +98,9 @@ function collapseAll(): void {
   collapsed.value = [...FIXTURE_POSITIONS]
 }
 
+/** 沿袭后的通道平均亮度（对本场全部 Cue 的有效电平取平均） */
 function averageIntensityOf(fixtureId: string): number | null {
-  return levelStore.averageIntensityOfFixture(fixtureId)
+  return averageIntensityOfFixture(fixtureId)
 }
 
 function openCreate(position?: FixturePosition): void {

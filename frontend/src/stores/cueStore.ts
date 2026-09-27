@@ -71,6 +71,7 @@ export const useCueStore = defineStore('cue', () => {
       fadeOutSec: draft.fadeOutSec,
       holdSec: draft.holdSec,
       note: draft.note,
+      inheritLevels: draft.inheritLevels,
       orderIndex: insertIndex + 1,
       createdAt: now,
       updatedAt: now
@@ -129,7 +130,8 @@ export const useCueStore = defineStore('cue', () => {
       fadeInSec: source.fadeInSec,
       fadeOutSec: source.fadeOutSec,
       holdSec: source.holdSec,
-      note: source.note
+      note: source.note,
+      inheritLevels: source.inheritLevels
     })
     const ordered = sortedCuesOfSession(source.sessionId)
     const sourceIndex = ordered.findIndex((cue) => cue.id === source.id)

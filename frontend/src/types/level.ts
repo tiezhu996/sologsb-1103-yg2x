@@ -17,6 +17,22 @@ export interface CueLevel {
   updatedAt: number
 }
 
+/** 解析后的有效电平：本条自设优先，缺失通道按「沿袭上一条」开关跟随上游 */
+export interface ResolvedLevel {
+  /** 对应灯位通道 */
+  fixtureId: string
+  /** 亮度 0-100（%） */
+  intensity: number
+  /** 色温（K） */
+  colorTempK: number
+  /** 对焦说明 */
+  focusNote: string
+  /** 数值来源：own=本条手动设定，inherited=沿袭上游 */
+  source: 'own' | 'inherited'
+  /** 数值来源 Cue id（own 时为自身） */
+  sourceCueId: string
+}
+
 /** 色温校验的单通道结果 */
 export interface ColorTempItem {
   fixtureId: string
