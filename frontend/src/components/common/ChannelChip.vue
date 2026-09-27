@@ -21,6 +21,8 @@ const props = withDefaults(
     fixtureType?: string
     /** 是否为重复通道号 */
     duplicate?: boolean
+    /** 亮度是否为沿袭上游的生效值（非本条自设） */
+    inherited?: boolean
     /** 是否为选中态 */
     selected?: boolean
     /** 是否显示悬停手型并可点击 */
@@ -34,6 +36,7 @@ const props = withDefaults(
     gel: '',
     fixtureType: '',
     duplicate: false,
+    inherited: false,
     selected: false,
     clickable: false,
     size: 'medium'
@@ -50,6 +53,13 @@ const intensityText = computed(() => (props.intensity === null || props.intensit
 
 const intensityWidth = computed(() => `${Math.min(100, Math.max(0, props.intensity ?? 0))}%`)
 
+const chipTitle = computed(
+  () =>
+    `CH${props.channel}${props.position ? ` · ${props.position}` : ''}${props.fixtureType ? ` · ${props.fixtureType}` : ''}${
+      props.inherited ? ' · 沿袭上游电平' : ''
+    }`
+)
+
 function handleClick(): void {
   if (props.clickable) emit('click')
 }
@@ -62,11 +72,12 @@ function handleClick(): void {
       `channel-chip--${props.size}`,
       {
         'channel-chip--duplicate': props.duplicate,
+        'channel-chip--inherited': props.inherited,
         'channel-chip--selected': props.selected,
         'channel-chip--clickable': props.clickable
       }
     ]"
-    :title="`CH${props.channel}${props.position ? ` · ${props.position}` : ''}${props.fixtureType ? ` · ${props.fixtureType}` : ''}`"
+    :title="chipTitle"
     @click="handleClick"
   >
     <span class="channel-chip__dot" :style="{ background: dotColor }" />
@@ -78,6 +89,7 @@ function handleClick(): void {
       </span>
       <span class="channel-chip__intensity-text">{{ intensityText }}</span>
     </span>
+    <span v-if="props.inherited" class="channel-chip__inherit">沿</span>
   </span>
 </template>
 
@@ -121,6 +133,19 @@ function handleClick(): void {
   border-color: rgba(232, 84, 84, 0.85);
   background: rgba(232, 84, 84, 0.14);
   color: #ffbdbd;
+}
+
+.channel-chip--inherited {
+  border-style: dashed;
+}
+
+.channel-chip__inherit {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(78, 161, 242, 0.16);
+  color: #9ec7f5;
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .channel-chip__dot {

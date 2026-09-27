@@ -17,9 +17,11 @@ import {
 import BlankHint from '@/components/common/BlankHint.vue'
 import ChannelChip from '@/components/common/ChannelChip.vue'
 import { useChannelConflict } from '@/hooks/useChannelConflict'
+import { useCueStore } from '@/stores/cueStore'
 import { useFixtureStore } from '@/stores/fixtureStore'
 import { useLevelStore } from '@/stores/levelStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { resolveSessionLevels } from '@/utils/inherit'
 import {
   DMX_CHANNEL_MAX,
   DMX_CHANNEL_MIN,
@@ -37,6 +39,7 @@ const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
 const sessionStore = useSessionStore()
+const cueStore = useCueStore()
 const fixtureStore = useFixtureStore()
 const levelStore = useLevelStore()
 
@@ -96,8 +99,22 @@ function collapseAll(): void {
   collapsed.value = [...FIXTURE_POSITIONS]
 }
 
+/** 全场 Cue 的生效电平（沿袭解析后），平均亮度按生效值计算 */
+const resolvedByCue = computed(() =>
+  resolveSessionLevels(cueStore.sortedCuesOfSession(sessionId.value), (cueId) => levelStore.levelsOfCue(cueId))
+)
+
+/** 通道在本场各条 Cue 下的平均亮度（沿袭后的生效值） */
 function averageIntensityOf(fixtureId: string): number | null {
-  return levelStore.averageIntensityOfFixture(fixtureId)
+  let total = 0
+  let count = 0
+  resolvedByCue.value.forEach((resolved) => {
+    const hit = resolved.find((level) => level.fixtureId === fixtureId)
+    if (!hit) return
+    total += hit.intensity
+    count += 1
+  })
+  return count === 0 ? null : Math.round(total / count)
 }
 
 function openCreate(position?: FixturePosition): void {

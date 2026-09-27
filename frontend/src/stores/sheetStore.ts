@@ -4,6 +4,7 @@ import type { RehearsalSheet, SheetChannelLine, SheetCueLine, SheetDraft } from 
 import { db } from '@/utils/db'
 import { createId } from '@/utils/id'
 import { sortFixturesByChannel } from '@/utils/patch'
+import { resolveSessionLevels } from '@/utils/inherit'
 import { useCueStore } from '@/stores/cueStore'
 import { useFixtureStore } from '@/stores/fixtureStore'
 import { useLevelStore } from '@/stores/levelStore'
@@ -51,19 +52,24 @@ export const useSheetStore = defineStore('sheet', () => {
     hydrated.value = true
   }
 
-  /** 依据勾选的 Cue 组装条目快照并落库 */
+  /** 依据勾选的 Cue 组装条目快照并落库；沿袭中的通道按生成时的生效值烘焙 */
   async function createSheet(draft: SheetDraft): Promise<RehearsalSheet | null> {
     const cueStore = useCueStore()
     const levelStore = useLevelStore()
     const fixtureStore = useFixtureStore()
 
-    const ordered = cueStore.sortedCuesOfSession(draft.sessionId).filter((cue) => draft.cueIds.includes(cue.id))
+    const allOrdered = cueStore.sortedCuesOfSession(draft.sessionId)
+    const ordered = allOrdered.filter((cue) => draft.cueIds.includes(cue.id))
     if (ordered.length === 0) return null
 
+    // 沿袭源可能不在勾选集合内，因此对全场 Cue 解析后再取勾选项的生效值
+    const resolvedByCue = resolveSessionLevels(allOrdered, (cueId) => levelStore.levelsOfCue(cueId))
+
     const cueLines: SheetCueLine[] = ordered.map((cue) => {
+      const resolved = new Map((resolvedByCue.get(cue.id) ?? []).map((item) => [item.fixtureId, item]))
       const channels: SheetChannelLine[] = sortFixturesByChannel(fixtureStore.fixturesOfSession(draft.sessionId))
         .map((fixture) => {
-          const level = levelStore.levelOf(cue.id, fixture.id)
+          const level = resolved.get(fixture.id)
           if (!level) return null
           return {
             channel: fixture.channel,

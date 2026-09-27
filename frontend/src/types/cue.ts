@@ -14,6 +14,11 @@ export interface Cue {
   label: string
   /** 触发方式 */
   trigger: CueTrigger
+  /**
+   * 沿袭上一条：开启后，本条未手动设定的通道跟随上游最近一条自设电平，
+   * 上游调整亮度 / 色温时本条同步生效；本条手动动过的通道以本条为准
+   */
+  inheritLevels: boolean
   /** 渐亮时长（秒） */
   fadeInSec: number
   /** 渐暗时长（秒） */
@@ -63,6 +68,7 @@ export function createEmptyCueDraft(sessionId: string, cueNo: string): CueDraft 
     cueNo,
     label: '',
     trigger: '手动',
+    inheritLevels: false,
     fadeInSec: 3,
     fadeOutSec: 3,
     holdSec: 5,

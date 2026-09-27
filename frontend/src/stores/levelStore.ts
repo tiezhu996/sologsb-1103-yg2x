@@ -41,14 +41,6 @@ export const useLevelStore = defineStore('level', () => {
     return levels.value.find((level) => level.cueId === cueId && level.fixtureId === fixtureId) ?? null
   }
 
-  /** 通道平均亮度，用于灯位配置台展示通道芯片的亮度 */
-  function averageIntensityOfFixture(fixtureId: string): number | null {
-    const matched = levels.value.filter((level) => level.fixtureId === fixtureId)
-    if (matched.length === 0) return null
-    const total = matched.reduce((sum, level) => sum + level.intensity, 0)
-    return Math.round(total / matched.length)
-  }
-
   function countOfCue(cueId: string): number {
     return levelsOfCue(cueId).length
   }
@@ -122,7 +114,6 @@ export const useLevelStore = defineStore('level', () => {
     levelsByCue,
     levelsOfCue,
     levelOf,
-    averageIntensityOfFixture,
     countOfCue,
     hydrate,
     upsertLevel,

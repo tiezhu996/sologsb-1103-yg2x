@@ -10,6 +10,7 @@ import {
   NInputNumber,
   NModal,
   NSelect,
+  NSwitch,
   useDialog,
   useMessage
 } from 'naive-ui'
@@ -25,6 +26,7 @@ import { CUE_TRIGGERS, type Cue, type CueTrigger } from '@/types/cue'
 import type { FixturePosition } from '@/types/fixture'
 import { cueTotalSeconds, formatSeconds, formatTransition } from '@/utils/fade'
 import { isValidCueNo, normalizeCueNo } from '@/utils/cueOrder'
+import { resolveSessionLevels } from '@/utils/inherit'
 
 const route = useRoute()
 const router = useRouter()
@@ -57,22 +59,41 @@ interface CueChannelChip {
   channel: number
   intensity: number
   position: FixturePosition | null
+  /** 是否为沿袭上游的生效值 */
+  inherited: boolean
 }
 
-/** 一条 Cue 已设定电平的通道标签 */
+/** 全场 Cue 的生效电平（沿袭解析后），随电平与开关联动更新 */
+const resolvedByCue = computed(() => resolveSessionLevels(cues.value, (cueId) => levelStore.levelsOfCue(cueId)))
+
+function resolvedCountOf(cueId: string): number {
+  return resolvedByCue.value.get(cueId)?.length ?? 0
+}
+
+/** 一条 Cue 生效电平的通道标签（含沿袭值） */
 function channelsOfCue(cueId: string): CueChannelChip[] {
   const chips: CueChannelChip[] = []
-  levelStore.levelsOfCue(cueId).forEach((level) => {
+  ;(resolvedByCue.value.get(cueId) ?? []).forEach((level) => {
     const fixture = fixtureStore.fixtureById(level.fixtureId)
     if (!fixture) return
     chips.push({
       fixtureId: level.fixtureId,
       channel: fixture.channel,
       intensity: level.intensity,
-      position: fixture.position
+      position: fixture.position,
+      inherited: level.source === 'inherited'
     })
   })
   return chips.sort((a, b) => a.channel - b.channel)
+}
+
+/** 切换「沿袭上一条」开关 */
+async function commitInherit(cue: Cue, enabled: boolean): Promise<void> {
+  if (cue.inheritLevels === enabled) return
+  await cueStore.updateCue(cue.id, { inheritLevels: enabled })
+  message.success(
+    enabled ? `${cue.cueNo} 已开启沿袭：未自设的通道跟随上游最近一条自设电平` : `${cue.cueNo} 已关闭沿袭，仅使用本条自设电平`
+  )
 }
 
 /* ---------------- 新增 Cue ---------------- */
@@ -81,6 +102,7 @@ const createForm = reactive<{
   cueNo: string
   label: string
   trigger: CueTrigger
+  inheritLevels: boolean
   fadeInSec: number | null
   fadeOutSec: number | null
   holdSec: number | null
@@ -89,6 +111,7 @@ const createForm = reactive<{
   cueNo: '',
   label: '',
   trigger: '手动',
+  inheritLevels: true,
   fadeInSec: 3,
   fadeOutSec: 3,
   holdSec: 5,
@@ -105,6 +128,7 @@ function openCreate(): void {
   createForm.cueNo = nextCueNo.value
   createForm.label = ''
   createForm.trigger = '手动'
+  createForm.inheritLevels = true
   createForm.fadeInSec = 3
   createForm.fadeOutSec = 3
   createForm.holdSec = 5
@@ -128,6 +152,7 @@ async function submitCreate(): Promise<void> {
     cueNo: normalizeCueNo(createForm.cueNo),
     label: createForm.label.trim(),
     trigger: createForm.trigger,
+    inheritLevels: createForm.inheritLevels,
     fadeInSec: createForm.fadeInSec ?? 0,
     fadeOutSec: createForm.fadeOutSec ?? 0,
     holdSec: createForm.holdSec ?? 0,
@@ -443,8 +468,24 @@ function channelFilterDuplicate(fixtureId: string): boolean {
                 style="width: 118px"
                 @update:value="(value) => commitTrigger(cue, value)"
               />
+              <label
+                class="inherit-toggle"
+                :title="
+                  index === 0
+                    ? '第一条 Cue 没有可沿袭的上一条'
+                    : '开启后，本条未自设的通道跟随上游最近一条自设电平，上游调整时同步生效'
+                "
+              >
+                <NSwitch
+                  :value="cue.inheritLevels"
+                  size="small"
+                  :disabled="index === 0"
+                  @update:value="(value) => commitInherit(cue, value === true)"
+                />
+                <span class="inherit-toggle__label">沿袭上一条</span>
+              </label>
               <NButton size="tiny" type="primary" ghost @click="goLevels(cue.id)">
-                电平编辑（{{ levelStore.levelsOfCue(cue.id).length }}）
+                电平编辑（{{ resolvedCountOf(cue.id) }}）
               </NButton>
             </div>
 
@@ -507,13 +548,16 @@ function channelFilterDuplicate(fixtureId: string): boolean {
                   :channel="channel.channel"
                   :position="channel.position"
                   :intensity="channel.intensity"
+                  :inherited="channel.inherited"
                   :duplicate="channelFilterDuplicate(channel.fixtureId)"
                   size="small"
                   clickable
                   @click="goLevels(cue.id)"
                 />
               </div>
-              <span v-else class="cue-row__channels-empty">未设定通道电平</span>
+              <span v-else class="cue-row__channels-empty">
+                {{ cue.inheritLevels ? '沿袭上一条 · 上游暂无可沿袭电平' : '未设定通道电平' }}
+              </span>
 
               <NInput
                 :value="noteValue(cue)"
@@ -530,7 +574,7 @@ function channelFilterDuplicate(fixtureId: string): boolean {
           </div>
 
           <div class="cue-row__actions">
-            <NButton size="tiny" quaternary :disabled="index === 0" @click="copyPrevious(cue)">沿用上一条</NButton>
+            <NButton size="tiny" quaternary :disabled="index === 0" @click="copyPrevious(cue)">沿用过渡参数</NButton>
             <NButton size="tiny" quaternary @click="duplicateCue(cue)">复制为新 Cue</NButton>
             <NButton size="tiny" quaternary :disabled="index === 0" @click="move(cue, -1)">上移</NButton>
             <NButton size="tiny" quaternary :disabled="index === cues.length - 1" @click="move(cue, 1)">下移</NButton>
@@ -556,6 +600,12 @@ function channelFilterDuplicate(fixtureId: string): boolean {
         </NFormItem>
         <NFormItem label="触发方式">
           <NSelect :value="createForm.trigger" :options="triggerOptions" @update:value="handleCreateTrigger" />
+        </NFormItem>
+        <NFormItem label="沿袭上一条">
+          <div class="create-form__row">
+            <NSwitch v-model:value="createForm.inheritLevels" />
+            <span class="create-form__hint">开启后未自设的通道跟随上游最近一条自设电平</span>
+          </div>
         </NFormItem>
         <NFormItem label="过渡时间">
           <div class="create-form__triple">
@@ -708,6 +758,21 @@ function channelFilterDuplicate(fixtureId: string): boolean {
 .cue-row__label {
   flex: 1;
   min-width: 200px;
+}
+
+.inherit-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.inherit-toggle__label {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  white-space: nowrap;
 }
 
 .cue-row__body {

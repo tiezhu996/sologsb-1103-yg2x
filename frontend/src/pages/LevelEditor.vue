@@ -14,6 +14,7 @@ import type { Fixture, FixturePosition } from '@/types/fixture'
 import { COLOR_TEMP_MAX, COLOR_TEMP_MIN, COLOR_TEMP_STEP } from '@/types/level'
 import { cueTotalSeconds, checkColorTempConsistency, formatSeconds, formatTransition } from '@/utils/fade'
 import { normalizeCueNo } from '@/utils/cueOrder'
+import { resolveSessionLevels, resolvedLevelOf } from '@/utils/inherit'
 
 const route = useRoute()
 const router = useRouter()
@@ -29,7 +30,24 @@ const sessionId = computed(() => cue.value?.sessionId ?? '')
 const session = computed(() => (sessionId.value ? sessionStore.sessionById(sessionId.value) : null))
 
 const fixtures = computed(() => (sessionId.value ? fixtureStore.sortedFixturesOfSession(sessionId.value) : []))
+/** 本条自设的通道电平 */
 const levels = computed(() => levelStore.levelsOfCue(cueId.value))
+
+const siblingCues = computed(() => (sessionId.value ? cueStore.sortedCuesOfSession(sessionId.value) : []))
+const cueIndex = computed(() => siblingCues.value.findIndex((item) => item.id === cueId.value))
+const isFirstCue = computed(() => cueIndex.value <= 0)
+const inheritOn = computed(() => cue.value?.inheritLevels ?? false)
+
+/** 沿袭解析后的生效电平：自设优先，未自设的通道跟随上游最近一条自设电平 */
+const resolvedLevels = computed(() => {
+  if (!cue.value) return []
+  const resolved = resolveSessionLevels(siblingCues.value, (id) => levelStore.levelsOfCue(id))
+  return resolved.get(cueId.value) ?? []
+})
+
+function resolvedOf(fixtureId: string) {
+  return resolvedLevelOf(resolvedLevels.value, fixtureId)
+}
 
 const siblingNos = computed(() =>
   cue.value
@@ -40,10 +58,10 @@ const siblingNos = computed(() =>
     : []
 )
 
-/** 已设定电平的通道（用于色温一致性判定） */
+/** 生效电平的通道（自设 + 沿袭，用于色温一致性判定） */
 const tempItems = computed(() => {
   const items: Array<{ fixtureId: string; channel: number; position: FixturePosition; colorTempK: number }> = []
-  levels.value.forEach((level) => {
+  resolvedLevels.value.forEach((level) => {
     const fixture = fixtureStore.fixtureById(level.fixtureId)
     if (!fixture) return
     items.push({
@@ -64,18 +82,36 @@ function isEnabled(fixtureId: string): boolean {
   return levelStore.levelOf(cueId.value, fixtureId) !== null
 }
 
+/** 展示用亮度：自设优先，其次沿袭值 */
 function intensityOf(fixtureId: string): number {
-  return levelStore.levelOf(cueId.value, fixtureId)?.intensity ?? 0
+  return resolvedOf(fixtureId)?.intensity ?? 0
 }
 
+/** 展示用色温：自设优先，其次沿袭值 */
 function tempOf(fixtureId: string): number {
-  return levelStore.levelOf(cueId.value, fixtureId)?.colorTempK ?? defaultTempK.value
+  return resolvedOf(fixtureId)?.colorTempK ?? defaultTempK.value
+}
+
+/** 沿袭来源的 Cue 编号（仅沿袭中且非自设时有值） */
+function inheritSourceNo(fixtureId: string): string | null {
+  if (isEnabled(fixtureId)) return null
+  const resolved = resolvedOf(fixtureId)
+  if (!resolved || resolved.source !== 'inherited' || !resolved.sourceCueId) return null
+  return cueStore.cueById(resolved.sourceCueId)?.cueNo ?? null
+}
+
+/** 色温列的状态文案：自设看漂移，沿袭看来源 */
+function driftTextOf(fixtureId: string): string {
+  if (isEnabled(fixtureId)) return `偏移 ${Math.abs(tempOf(fixtureId) - defaultTempK.value)}K`
+  const sourceNo = inheritSourceNo(fixtureId)
+  if (sourceNo) return `沿袭自 ${sourceNo}`
+  return inheritOn.value ? '上游无可沿袭' : '未参与'
 }
 
 const focusDrafts = ref<Record<string, string>>({})
 
 function focusValue(fixtureId: string): string {
-  return focusDrafts.value[fixtureId] ?? levelStore.levelOf(cueId.value, fixtureId)?.focusNote ?? ''
+  return focusDrafts.value[fixtureId] ?? resolvedOf(fixtureId)?.focusNote ?? ''
 }
 
 function onFocusInput(fixtureId: string, value: string): void {
@@ -94,13 +130,16 @@ async function commitFocus(fixtureId: string): Promise<void> {
 
 async function toggleFixture(fixture: Fixture, enabled: boolean): Promise<void> {
   if (enabled) {
+    // 开启「本条自设」时以当前生效值（含沿袭值）为起点，随后手动调整即覆盖沿袭
+    const resolved = resolvedOf(fixture.id)
     await levelStore.upsertLevel(cueId.value, fixture.id, {
-      intensity: 70,
-      colorTempK: defaultTempK.value,
+      intensity: resolved?.intensity ?? 70,
+      colorTempK: resolved?.colorTempK ?? defaultTempK.value,
       focusNote: focusValue(fixture.id)
     })
     return
   }
+  // 关闭自设：开启沿袭的 Cue 回落为跟随上游，未开启则不再参与本 Cue
   await levelStore.removeLevel(cueId.value, fixture.id)
 }
 
@@ -113,17 +152,34 @@ async function setColorTemp(fixtureId: string, value: number | null): Promise<vo
   await levelStore.upsertLevel(cueId.value, fixtureId, { colorTempK: value })
 }
 
+/** 对齐基准色温：对全部生效通道落为本条自设（沿袭中的通道随之转为自设） */
 async function alignToDominant(): Promise<void> {
-  if (levels.value.length === 0) return
+  if (resolvedLevels.value.length === 0) return
   const target = tempCheck.value.dominantK
-  await Promise.all(levels.value.map((level) => levelStore.upsertLevel(cueId.value, level.fixtureId, { colorTempK: target })))
-  message.success(`已将 ${levels.value.length} 个通道对齐到 ${target}K`)
+  await Promise.all(
+    resolvedLevels.value.map((level) =>
+      levelStore.upsertLevel(cueId.value, level.fixtureId, {
+        intensity: level.intensity,
+        colorTempK: target,
+        focusNote: level.focusNote
+      })
+    )
+  )
+  message.success(`已将 ${resolvedLevels.value.length} 个通道对齐到 ${target}K`)
 }
 
+/** 清空本条自设电平；开启沿袭时清空后回落为跟随上游 */
 async function clearAll(): Promise<void> {
   const count = levels.value.length
   await levelStore.removeByCue(cueId.value)
   message.success(`已清空 ${count} 个通道电平`)
+}
+
+/** 切换「沿袭上一条」开关 */
+async function toggleInherit(enabled: boolean): Promise<void> {
+  if (!cue.value || cue.value.inheritLevels === enabled) return
+  await cueStore.updateCue(cue.value.id, { inheritLevels: enabled })
+  message.success(enabled ? '已开启沿袭：未自设的通道跟随上游最近一条自设电平' : '已关闭沿袭，本 Cue 仅使用本条自设电平')
 }
 
 async function commitCueNo(value: string): Promise<void> {
@@ -137,8 +193,6 @@ async function commitCueNo(value: string): Promise<void> {
   await cueStore.updateCue(cue.value.id, { cueNo: normalized })
   message.success(`编号已改为 ${normalized}`)
 }
-
-const siblingCues = computed(() => (sessionId.value ? cueStore.sortedCuesOfSession(sessionId.value) : []))
 
 function goSiblingCue(direction: -1 | 1): void {
   if (!cue.value) return
@@ -194,6 +248,22 @@ function goSheets(): void {
             <p class="cue-head__meta mono">{{ formatTransition(cue) }} · 合计 {{ formatSeconds(cueTotalSeconds(cue)) }}</p>
           </div>
           <NTag size="small" :bordered="false" type="warning">{{ cue.trigger }}</NTag>
+          <label
+            class="inherit-toggle"
+            :title="
+              isFirstCue
+                ? '第一条 Cue 没有可沿袭的上一条'
+                : '开启后，本条未自设的通道跟随上游最近一条自设电平，上游调整时同步生效'
+            "
+          >
+            <NSwitch
+              :value="cue.inheritLevels"
+              size="small"
+              :disabled="isFirstCue"
+              @update:value="(value) => toggleInherit(value === true)"
+            />
+            <span class="inherit-toggle__label">沿袭上一条</span>
+          </label>
           <span class="toolbar__spacer" />
           <NButton size="small" quaternary @click="goSiblingCue(-1)">上一条 Cue</NButton>
           <NButton size="small" quaternary @click="goSiblingCue(1)">下一条 Cue</NButton>
@@ -209,13 +279,17 @@ function goSheets(): void {
       </NAlert>
 
       <div class="toolbar">
-        <span class="toolbar__label">已设定 {{ levels.length }} / {{ fixtures.length }} 个通道</span>
+        <span class="toolbar__label">
+          生效 {{ resolvedLevels.length }} / {{ fixtures.length }} 个通道<template v-if="inheritOn"
+            >（本条自设 {{ levels.length }} 个，其余沿袭上游）</template
+          >
+        </span>
         <span class="toolbar__spacer" />
-        <NButton size="small" :disabled="levels.length === 0" @click="alignToDominant">
+        <NButton size="small" :disabled="resolvedLevels.length === 0" @click="alignToDominant">
           全部对齐到 {{ defaultTempK }}K
         </NButton>
         <NButton size="small" quaternary type="error" :disabled="levels.length === 0" @click="clearAll">
-          清空本 Cue 电平
+          {{ inheritOn ? '清空本条自设电平' : '清空本 Cue 电平' }}
         </NButton>
       </div>
 
@@ -229,7 +303,9 @@ function goSheets(): void {
 
       <section v-else class="panel">
         <h2 class="panel__title">
-          通道电平<span class="panel__title-tag">开关控制该通道是否参与本 Cue</span>
+          通道电平<span class="panel__title-tag">{{
+            inheritOn ? '开关控制该通道是否本条自设，关闭时沿袭上游最近一条自设电平' : '开关控制该通道是否参与本 Cue'
+          }}</span>
         </h2>
 
         <div class="level-table">
@@ -245,7 +321,10 @@ function goSheets(): void {
             v-for="fixture in fixtures"
             :key="fixture.id"
             class="level-row"
-            :class="{ 'level-row--off': !isEnabled(fixture.id) }"
+            :class="{
+              'level-row--off': !isEnabled(fixture.id),
+              'level-row--inherited': inheritSourceNo(fixture.id) !== null
+            }"
           >
             <NSwitch
               :value="isEnabled(fixture.id)"
@@ -257,7 +336,8 @@ function goSheets(): void {
               <ChannelChip
                 :channel="fixture.channel"
                 :position="fixture.position"
-                :intensity="isEnabled(fixture.id) ? intensityOf(fixture.id) : null"
+                :intensity="resolvedOf(fixture.id) ? intensityOf(fixture.id) : null"
+                :inherited="inheritSourceNo(fixture.id) !== null"
                 :gel="fixture.gel"
                 :fixture-type="fixture.fixtureType"
                 size="small"
@@ -297,13 +377,7 @@ function goSheets(): void {
                 style="width: 108px"
                 @update:value="(value) => setColorTemp(fixture.id, value)"
               />
-              <span class="level-row__drift mono">
-                {{
-                  isEnabled(fixture.id)
-                    ? `偏移 ${Math.abs(tempOf(fixture.id) - defaultTempK)}K`
-                    : '未参与'
-                }}
-              </span>
+              <span class="level-row__drift mono">{{ driftTextOf(fixture.id) }}</span>
             </div>
 
             <NInput
@@ -319,7 +393,7 @@ function goSheets(): void {
         </div>
       </section>
 
-      <section v-if="levels.length > 0" class="panel">
+      <section v-if="tempItems.length > 0" class="panel">
         <h2 class="panel__title">色温一致性检查<span class="panel__title-tag">容差 ±{{ tempCheck.toleranceK }}K</span></h2>
         <div class="temp-grid">
           <div
@@ -397,6 +471,25 @@ function goSheets(): void {
 
 .level-row--off {
   opacity: 0.5;
+}
+
+.level-row--off.level-row--inherited {
+  opacity: 0.85;
+}
+
+.inherit-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.inherit-toggle__label {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  white-space: nowrap;
 }
 
 .level-row__chip {

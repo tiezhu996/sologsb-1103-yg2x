@@ -17,6 +17,24 @@ export interface CueLevel {
   updatedAt: number
 }
 
+/** 沿袭解析后的生效电平：本条自设优先，否则取上游最近一条自设电平 */
+export interface ResolvedLevel {
+  /** 生效的 Cue */
+  cueId: string
+  /** 对应灯位通道 */
+  fixtureId: string
+  /** 亮度 0-100（%） */
+  intensity: number
+  /** 色温（K） */
+  colorTempK: number
+  /** 对焦说明 */
+  focusNote: string
+  /** 取值来源：own=本条手动设置；inherited=沿袭上游 */
+  source: 'own' | 'inherited'
+  /** 沿袭来源 Cue 的 id（source 为 own 时为 null） */
+  sourceCueId: string | null
+}
+
 /** 色温校验的单通道结果 */
 export interface ColorTempItem {
   fixtureId: string
